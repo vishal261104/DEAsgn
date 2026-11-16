@@ -1,0 +1,11 @@
+.env
+*.pkl
+*.csv
+mage.log
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+.DS_Store
