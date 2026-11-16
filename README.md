@@ -12,98 +12,130 @@
 
 ## 📖 Executive Summary
 
-**FreshCart Pipelines** is an enterprise-grade Data Engineering and Machine Learning project structured around the end-to-end lifecycle **"From Git to Gold"**. The repository brings together:
+**FreshCart Pipelines** is an enterprise-grade Data Engineering and Machine Learning project structured around the end-to-end lifecycle **"From Git to Gold"**. The repository unifies three production-grade systems under a single, CI-verified codebase:
 
-1. **A Snowflake Medallion ELT Pipeline**: Demonstrating raw semi-structured JSON ingestion, schema reconciliation, quarantine error handling, deduplication, Slowly Changing Dimensions Type 2 (SCD2), Foreign Exchange currency normalization with gap-filling, geographic enrichment, and idempotent Gold-layer publishing.
-2. **A Production ML Pipeline (Mage AI)**: Implementing a DAG-based machine learning workflow for the Iris classification dataset with data loaders, transformers, unit tests, model training, evaluation, and serialized batch inference export.
-3. **Event Streaming Infrastructure**: Prepared for RabbitMQ message dispatching and real-time streaming ingestion.
-4. **Automated CI/CD**: Fully tested with GitHub Actions running continuous integration against Python 3.12.
+| Pillar | Technology | What it does |
+| :--- | :--- | :--- |
+| **Snowflake Medallion ELT** | Python · SQL · Snowflake | Bronze → Silver → Gold data lakehouse with quarantine, SCD2, FX normalisation, and idempotent publishing |
+| **Mage AI ML Pipeline** | scikit-learn · Mage AI · joblib | Multi-model Iris classification DAG with input validation, Decision Tree & KNN, evaluation, and batch export |
+| **RabbitMQ Event Streaming** | Pika · RabbitMQ | Topic-exchange dispatcher + consumer driver simulating real-time ride/food dispatch routing |
+
+Continuous integration via **GitHub Actions** (Python 3.12) validates every push and pull request automatically.
 
 ---
 
 ## 🏗️ Architecture Overview
 
-### 1. Snowflake Medallion ELT Architecture
+### 1. Snowflake Medallion ELT
 
 ```
-                                [ Web Orders (Flat JSON) ]
-                                [ Mobile Orders (Nested JSON) ]
-                                            │
-                                            ▼
-                           ┌─────────────────────────────────┐
-                           │   Extract & Landing (GZIP)      │
-                           └─────────────────────────────────┘
-                                            │
-                                            ▼
-                           ┌─────────────────────────────────┐
-                           │      BRONZE: Raw Storage        │
-                           │       bronze.orders_raw         │
-                           └─────────────────────────────────┘
-                                            │
-                      ┌─────────────────────┴─────────────────────┐
-                      ▼                                           ▼
-         ┌─────────────────────────┐                 ┌─────────────────────────┐
-         │  silver.orders_checked  │                 │    quarantine.orders    │
-         │  (Schema validation)    │                 │ (Corrupt/invalid rows)  │
-         └─────────────────────────┘                 └─────────────────────────┘
-                      │
-                      ▼
-         ┌─────────────────────────┐
-         │   silver.orders_clean   │
-         └─────────────────────────┘
-                      │
-                      ▼
-         ┌─────────────────────────┐
-         │   silver.orders_dedup   │ ◄── Window Dedup (Latest updated_at)
-         └─────────────────────────┘
-                      │
-                      ├──────────────────────────┬──────────────────────────┐
-                      ▼                          ▼                          ▼
-         ┌─────────────────────────┐┌─────────────────────────┐┌─────────────────────────┐
-         │    dim.customers_scd2   ││      ref.fx_daily       ││     ref.pincode_geo     │
-         │ (Customer Tier History) ││ (Forward-filled to INR) ││ (District, State, Region)│
-         └─────────────────────────┘└─────────────────────────┘└─────────────────────────┘
-                      │                          │                          │
-                      └──────────────────────────┼──────────────────────────┘
-                                                 │
+   ┌──────────────────────────┐   ┌──────────────────────────┐
+   │  Web Orders (flat JSON)  │   │ Mobile Orders (nested JSON)│
+   └────────────┬─────────────┘   └────────────┬──────────────┘
+                │                              │
+                └──────────────┬───────────────┘
+                               ▼
+                 ┌─────────────────────────────┐
+                 │   EXTRACT & LAND (GZIP)     │  PUT → Snowflake stage
+                 └─────────────────────────────┘
+                               ▼
+                 ┌─────────────────────────────┐
+                 │   BRONZE: bronze.orders_raw  │  Raw JSON, append-only
+                 └──────────────┬──────────────┘
+                                │
+           ┌────────────────────┴────────────────────┐
+           ▼                                         ▼
+ ┌──────────────────────┐                ┌────────────────────────┐
+ │ silver.orders_checked│                │   quarantine.orders    │
+ │  (validation logic)  │                │  (bad rows + reasons)  │
+ └──────────┬───────────┘                └────────────────────────┘
+            ▼
+ ┌──────────────────────┐
+ │  silver.orders_clean │
+ └──────────┬───────────┘
+            ▼
+ ┌──────────────────────┐
+ │  silver.orders_dedup │  ← QUALIFY window dedup (latest updated_at)
+ └────┬─────────────────┘
+      │
+      ├──────────────────────┬──────────────────────┐
+      ▼                      ▼                      ▼
+ ┌──────────────┐   ┌──────────────────┐   ┌──────────────────┐
+ │dim.customers │   │  ref.fx_daily    │   │ ref.pincode_geo  │
+ │_scd2 (SCD2)  │   │ (gap-filled INR) │   │(district/region) │
+ └──────┬───────┘   └────────┬─────────┘   └────────┬─────────┘
+        └───────────────────┬┘                       │
+                            └───────────────────────┬┘
+                                                    ▼
+                              ┌───────────────────────────────────┐
+                              │      silver.orders_enriched       │
+                              │ (point-in-time joins, INR values) │
+                              └──────────────────┬────────────────┘
                                                  ▼
-                               ┌───────────────────────────────────┐
-                               │       silver.orders_enriched      │
-                               │   (Point-in-time joins, INR conv) │
-                               └───────────────────────────────────┘
-                                                 │
-                                                 ▼
-                               ┌───────────────────────────────────┐
-                               │          GOLD FACT TABLE          │
-                               │          gold.fct_orders          │
-                               │     (Idempotent MERGE by hash)    │
-                               └───────────────────────────────────┘
+                              ┌───────────────────────────────────┐
+                              │         gold.fct_orders           │
+                              │  Idempotent MERGE via row_hash    │
+                              └───────────────────────────────────┘
 ```
 
-### 2. Mage ML Pipeline DAG (`iris_classifier`)
+### 2. Mage AI ML Pipeline DAG (`iris_classifier`)
 
 ```
-   ┌────────────────────────────────┐
-   │    data_loader: load_iris      │ ──► Verified with @test (150 rows)
-   └────────────────────────────────┘
-                   │
-                   ▼
-   ┌────────────────────────────────┐
-   │  transformer: prepare_data     │ ──► 80/20 Train/Test split
-   └────────────────────────────────┘
-                   │
-                   ▼
-   ┌────────────────────────────────┐
-   │    transformer: train_model    │ ──► DecisionTreeClassifier (max_depth=3)
-   └────────────────────────────────┘     Asserts accuracy >= 80% -> iris_model.pkl
-                   │
-        ┌──────────┴──────────┐
-        ▼                     ▼
-┌──────────────────┐  ┌───────────────────────────────┐
-│ evaluate_model   │  │  data_exporter: save_results  │
-│ (Confusion Mtx,  │  │  (iris_predictions.csv)       │
-│  P/R/F1-Score)   │  └───────────────────────────────┘
-└──────────────────┘
+         ┌──────────────────────────────────────┐
+         │      data_loader: load_iris          │
+         │  Loads 150-row Iris DataFrame        │
+         │  @test: assert 150 rows             │
+         └───────────────────┬──────────────────┘
+                             │
+             ┌───────────────┴───────────────┐
+             ▼                               ▼
+ ┌───────────────────────┐    ┌───────────────────────────┐
+ │transformer:prepare_data│    │transformer:validate_iris  │
+ │ 80/20 train/test split │    │ Null check + 3-class check│
+ │ adds 'split' column    │    │ @test: clean DataFrame    │
+ └──────────┬────────────┘    └───────────────────────────┘
+            │
+    ┌───────┴────────┐
+    ▼                ▼
+ ┌────────────────┐  ┌──────────────────────────┐
+ │transformer:    │  │transformer: train_knn     │
+ │train_model     │  │ KNeighboursClassifier k=5 │
+ │DecisionTree    │  │ @test: accuracy >= 80%    │
+ │max_depth=3     │  └──────────────────────────┘
+ │saves .pkl      │
+ │@test: >=80%    │
+ └───────┬────────┘
+         │
+   ┌─────┴─────┐
+   ▼           ▼
+ ┌──────────┐  ┌────────────────────────────────┐
+ │evaluate_ │  │data_exporter: save_results     │
+ │model     │  │ Writes iris_predictions.csv    │
+ │Confusion │  └────────────────────────────────┘
+ │P/R/F1    │
+ └──────────┘
+```
+
+### 3. RabbitMQ Event Streaming
+
+```
+                      ┌──────────────────────┐
+                      │  stream/dispatcher.py │
+                      │  Publishes 60 events  │
+                      │  every 2 s            │
+                      └──────────┬───────────┘
+                                 │  topic exchange: rapido-dispatch
+                    ┌────────────┼─────────────────────────┐
+                    │            │                         │
+         <city>.<zone>.<type>  <city>.<type>        <city>.<zone>.<type>
+         (normal order)        (partial / no zone)  (normal order)
+                    │            │                         │
+                    ▼            ▼                         ▼
+         ┌──────────────┐  ┌──────────────────┐  ┌──────────────┐
+         │ driver.py    │  │  driver.py        │  │ driver.py    │
+         │ ACCEPT ✓     │  │  REJECT ✗ nack    │  │ ACCEPT ✓     │
+         │ (has zone)   │  │  (no zone field)  │  │ (has zone)   │
+         └──────────────┘  └──────────────────┘  └──────────────┘
 ```
 
 ---
@@ -111,176 +143,207 @@
 ## 📁 Repository Structure
 
 ```plaintext
-freshcart-pipelines-c1/
+freshcart-pipelines/
 │
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                     # GitHub Actions CI workflow (Python 3.12)
+│       └── ci.yml                        # GitHub Actions CI — Python 3.12, pytest, stream import check
 │
 ├── elt/
 │   ├── .gitkeep
-│   └── freshcart_elt.ipynb            # Snowflake Medallion ELT notebook (Bronze -> Silver -> Gold)
+│   └── freshcart_elt.ipynb               # Full Snowflake Medallion ELT notebook (Bronze → Silver → Gold)
 │
-├── iris_project/                      # Mage AI Orchestration Project
-│   ├── __init__.py
+├── iris_project/                         # Mage AI ML orchestration project
+│   ├── __init__.py                       # Package init (v0.2.0)
 │   ├── .gitkeep
-│   ├── Mage_ML_Pipeline.ipynb         # Interactive notebook demonstrating Mage setup & execution
+│   ├── Mage_ML_Pipeline.ipynb            # Interactive walkthrough notebook
 │   ├── data_loaders/
-│   │   └── load_iris.py               # Data loader with row-count validation test
+│   │   └── load_iris.py                  # Loads Iris dataset; @test asserts 150 rows
 │   ├── transformers/
 │   │   ├── __init__.py
-│   │   ├── prepare_data.py            # Train/test split transformer with quality tests
-│   │   ├── train_model.py             # Model training transformer & decision tree persistence
-│   │   └── evaluate_model.py          # Metric computation (Accuracy, Precision, Recall, Macro-F1)
+│   │   ├── prepare_data.py               # 80/20 train/test split; @test checks 'split' column
+│   │   ├── validate_iris.py              # 🆕 Null + class-count guard before split/train
+│   │   ├── train_model.py                # DecisionTreeClassifier (max_depth=3); saves iris_model.pkl
+│   │   ├── train_knn.py                  # 🆕 KNeighboursClassifier (k=5, configurable); @test >= 80%
+│   │   └── evaluate_model.py             # Accuracy, Precision, Recall, Macro-F1; confusion matrix
 │   ├── data_exporters/
-│   │   └── save_results.py            # Batch inference CSV exporter
+│   │   └── save_results.py               # Writes iris_predictions.csv
 │   └── pipelines/
 │       └── iris_classifier/
-│           └── metadata.yaml          # Mage pipeline DAG dependency configuration
+│           └── metadata.yaml             # Mage DAG: full 7-block dependency graph
 │
-├── stream/
-│   └── .gitkeep                       # Streaming & RabbitMQ dispatcher assets
+├── stream/                               # 🆕 RabbitMQ event streaming module
+│   ├── __init__.py                       # Package init (v0.1.0)
+│   ├── dispatcher.py                     # Topic-exchange publisher — 60 ride/food dispatch events
+│   └── driver.py                         # Consumer driver — accepts/nacks based on routing key
 │
 ├── tests/
-│   └── test_prepare_data.py           # Automated unit test suite
+│   └── test_prepare_data.py              # Pytest: verifies 80/20 split produces 120/30 rows
 │
-├── .gitignore                         # Git exclusion rules
-├── requirements.txt                   # Production & testing dependencies
-└── README.md                          # Comprehensive project documentation
+├── .gitignore
+├── requirements.txt                      # pandas, scikit-learn, pytest, pika
+└── README.md
 ```
 
 ---
 
-## 🔧 Core Pipeline Details
+## 🔧 Core Component Details
 
-### 1. Snowflake ELT: Medallion Architecture (`elt/freshcart_elt.ipynb`)
+### 1. Snowflake ELT (`elt/freshcart_elt.ipynb`)
 
-The ELT pipeline implements standard data warehousing patterns:
+| Stage | Table | Key Logic |
+| :--- | :--- | :--- |
+| Extract | (stage files) | GZIP-compressed JSON; `source`, `run_id`, `extracted_at` metadata injected |
+| Load | `bronze.orders_raw` | `PUT` + `COPY INTO`; append-only; retains all historical loads |
+| Cleanse | `silver.orders_checked` | Unified schema across web (flat) and mobile (nested) APIs; RFC email, non-negative amounts, valid status |
+| Quarantine | `quarantine.orders` | Invalid rows isolated with structured `reasons` array; pipeline continues |
+| Dedup | `silver.orders_dedup` | `QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY updated_at DESC, ingest_seq DESC) = 1` |
+| Dimension | `dim.customers_scd2` | SCD Type 2 — non-overlapping `valid_from`/`valid_to` date ranges per customer tier change |
+| Reference | `ref.fx_daily` | Daily FX rates flattened from nested JSON; weekend/holiday gaps filled by forward-fill |
+| Reference | `ref.pincode_geo` | `MERGE` upsert from India Post lookup; district, state, sales region |
+| Enrich | `silver.orders_enriched` | Point-in-time joins to SCD2 and FX; LEFT JOIN ensures no order lost |
+| Publish | `gold.fct_orders` | Idempotent `MERGE ON order_id` with SHA-256 `row_hash` guard; re-runnable |
+| Quality | (inline SQL) | Automated checks: row-count preservation, zero duplicates, zero orphaned orders |
 
-- **Multi-Source Ingestion**: Ingests flat JSON orders from web channels and nested JSON payloads from mobile applications into a unified Bronze landing table (`bronze.orders_raw`).
-- **Data Cleansing & Quarantine**: Validates incoming attributes (RFC email standards, non-negative order amounts, recognized payment statuses). Invalid records are isolated into `quarantine.orders` with explicit reason arrays without halting ingestion.
-- **Deduplication Engine**: Uses Snowflake window functions (`QUALIFY ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY updated_at DESC, ingest_seq DESC) = 1`) to guarantee deterministic deduplication.
-- **Slowly Changing Dimensions (SCD2)**: Tracks historical customer tier modifications (`dim.customers_scd2`) with non-overlapping `valid_from` and `valid_to` timestamps.
-- **Foreign Exchange Normalization**: Flattens nested daily currency exchange rates in `ref.fx_daily`, with backward/forward fills across weekends and bank holidays, converting all order transactions to INR.
-- **Geographic Enrichment**: Joins postal pincodes (`ref.pincode_geo`) to districts, states, and sales regions.
-- **Idempotent Gold Publishing**: Enriches transactions into `silver.orders_enriched` and merges into `gold.fct_orders` using deterministic SHA-256 row hashing (`row_hash`) to avoid duplicate records on re-runs.
-- **Data Reconciliation Checks**: Built-in automated SQL assertions verify zero orphaned records, zero loss between deduplication and enrichment, and zero duplicate entries.
-
-### 2. Mage ML Pipeline (`iris_project/`)
-
-An orchestration pipeline leveraging Mage AI design principles:
-
-- **Decoupled Block Architecture**: Modular blocks for loading, transforming, training, and exporting.
-- **Built-in Quality Assertions (`@test`)**: Every step executes validation hooks before passing data to downstream blocks:
-  - Dataset size check (150 samples).
-  - Feature integrity and split tag presence.
-  - Model accuracy threshold assertion ($\ge 80\%$).
-- **Artifact Management**:
-  - Model persistence via `joblib` (`iris_model.pkl`).
-  - Predictions exported to `iris_predictions.csv`.
-- **DAG Definition**: Configured through `metadata.yaml` with dynamic parameterization support (e.g., `max_depth`).
-
-### 3. Event Streaming (`stream/`)
-
-- Designed for message queue ingestion with RabbitMQ and the Python `pika` library.
-- Decouples real-time order generation from batch/micro-batch processing workloads.
+**Expected final output:** `4 orders · ₹7,785 revenue · 126 loyalty points`
 
 ---
 
-## 🚀 Getting Started & Local Setup
+### 2. Mage AI ML Pipeline (`iris_project/`)
+
+#### Block inventory
+
+| Block | Type | Description |
+| :--- | :--- | :--- |
+| `load_iris` | data_loader | Loads 150-row Iris DataFrame from scikit-learn; asserts row count |
+| `validate_iris` | transformer | Upstream quality gate — no nulls, exactly 3 target classes |
+| `prepare_data` | transformer | Stratified 80/20 split with deterministic `random_state=42`; labels rows with `'split'` column |
+| `train_model` | transformer | `DecisionTreeClassifier(max_depth=3)`; asserts ≥ 80 % test accuracy; persists to `iris_model.pkl` |
+| `train_knn` | transformer | `KNeighborsClassifier(n_neighbors=5)` running in parallel to Decision Tree; same accuracy gate |
+| `evaluate_model` | transformer | Confusion matrix + Accuracy, Precision, Recall, Macro-F1 Score |
+| `save_results` | data_exporter | Writes Decision Tree predictions to `iris_predictions.csv` |
+
+All blocks use a **`try/except ImportError` decorator shim** so they execute correctly both inside the Mage server and standalone via `python -m pytest`.
+
+---
+
+### 3. RabbitMQ Streaming (`stream/`)
+
+#### `dispatcher.py`
+
+Publishes **60 randomised order events** to the `rapido-dispatch` topic exchange at a configurable cadence (default: 2 s / message).
+
+| Config var | Default | Description |
+| :--- | :--- | :--- |
+| `AMQP_HOST` | `localhost` | RabbitMQ broker hostname |
+| `DISPATCH_COUNT` | `60` | Total messages to publish |
+| `DISPATCH_INTERVAL` | `2.0` | Seconds between publishes |
+
+Routing key convention:
+- **Normal** (90 % of traffic): `<city>.<zone>.<type>` — e.g. `bangalore.koramangala.ride`
+- **Partial** (every 10th message): `<city>.<type>` — e.g. `chennai.food` ← triggers driver rejection
+
+#### `driver.py`
+
+A topic-pattern consumer simulating a delivery driver:
+
+- Subscribes to any AMQP topic pattern supplied as a CLI argument.
+- **Accepts** messages that contain a `zone` field (`basic_ack`).
+- **Rejects** zone-less or malformed messages (`basic_nack`, no requeue).
+- Sets `prefetch_count=1` for fair dispatch across concurrent driver processes.
+- Shuts down gracefully on `Ctrl+C`.
+
+```bash
+# Start a driver in bangalore accepting all order types
+python -m stream.driver "Ravi" "bangalore.#"
+
+# Start a driver for a specific city/zone/type combination
+python -m stream.driver "Priya" "chennai.velachery.food"
+```
+
+---
+
+## 🚀 Getting Started
 
 ### Prerequisites
 
-- **Python 3.12+**
-- **Git**
-- Optional: Active **Snowflake** account (for running the ELT notebook)
-- Optional: **RabbitMQ** service (for streaming consumers/producers)
+| Requirement | Notes |
+| :--- | :--- |
+| Python 3.12+ | Required |
+| Git | Required |
+| Snowflake account | Optional — for the ELT notebook only |
+| RabbitMQ (local or Docker) | Optional — for the stream module only |
 
-### 1. Clone & Set Up Virtual Environment
+### Setup
 
 ```bash
-# Clone the repository
+# 1. Clone
 git clone https://github.com/vishal261104/DEAsgn.git
 cd DEAsgn
 
-# Create and activate a Python virtual environment
+# 2. Virtual environment
 python -m venv .venv
+# Windows (PowerShell):  .venv\Scripts\Activate.ps1
+# macOS / Linux:         source .venv/bin/activate
 
-# On Windows (PowerShell):
-.venv\Scripts\Activate.ps1
-# On Windows (CMD):
-.venv\Scripts\activate.bat
-# On macOS / Linux:
-source .venv/bin/activate
-```
-
-### 2. Install Dependencies
-
-```bash
+# 3. Dependencies
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+
+# 4. Run tests
+python -m pytest -q
 ```
 
-### 3. Run Automated Tests
-
-To execute the test suite:
+### Run the ML Pipeline (Mage AI)
 
 ```bash
-pytest -q
-```
-
----
-
-## 📊 Running the Pipelines
-
-### Running Snowflake ELT (`elt/freshcart_elt.ipynb`)
-
-1. Launch Jupyter Notebook or JupyterLab:
-   ```bash
-   pip install jupyter
-   jupyter lab
-   ```
-2. Open `elt/freshcart_elt.ipynb`.
-3. Provide your Snowflake connection details:
-   - `SNOWFLAKE_ACCOUNT`
-   - `SNOWFLAKE_USER`
-   - Password (prompted securely at runtime via `getpass`)
-4. Run all cells to execute extraction, staging, transformation, and verification.
-5. **Expected Gold Output**:
-   - Aggregated Revenue: `₹7,785.00`
-   - Total Orders Processed: `4`
-   - Loyalty Points Accumulated: `126`
-
-### Running the ML Pipeline (`iris_project/`)
-
-You can run the pipeline directly via Mage AI or interactively via the notebook:
-
-```bash
-# Optional: Install Mage AI
 pip install mage-ai
-
-# Start Mage server inside the project root
 mage start iris_project
+# Open http://localhost:6789 → iris_classifier → Run pipeline
 ```
 
-Access the Mage user interface at `http://localhost:6789` to monitor block execution and DAG runs. Alternatively, explore `iris_project/Mage_ML_Pipeline.ipynb`.
+### Run the Streaming Demo (RabbitMQ required)
+
+```bash
+# Terminal 1 — dispatcher
+python -m stream.dispatcher
+
+# Terminal 2 — driver A (all bangalore)
+python -m stream.driver "Ravi" "bangalore.#"
+
+# Terminal 3 — driver B (specific city/zone/type)
+python -m stream.driver "Priya" "chennai.velachery.food"
+```
+
+### Run the ELT Notebook (Snowflake required)
+
+```bash
+pip install jupyter
+jupyter lab
+# Open elt/freshcart_elt.ipynb → provide Snowflake credentials → Run All
+```
 
 ---
 
-## 🛡️ Engineering Highlights & Best Practices
+## 🛡️ Engineering Highlights
 
-| Capability | Implementation | Benefit |
+| Practice | Implementation | Benefit |
 | :--- | :--- | :--- |
-| **Idempotency** | Surrogate hashing (`row_hash`) & `MERGE` statements | Re-running pipelines produces deterministic results without duplication |
-| **Data Quality Gates** | In-pipeline `@test` decorators & SQL assertions | Prevents pipeline regression and bad data propagation |
-| **Quarantine Pattern** | Route rejected rows to `quarantine.orders` with reason arrays | Prevents ingestion job failures while providing an audit trail for data cleanup |
-| **Point-in-Time Accuracy** | SCD Type 2 dimension mapping | Accurate historical backfills respecting historical state changes |
-| **Modular CI/CD** | GitHub Actions workflow validating Python 3.12 | Automated verification on every push and pull request |
+| **Idempotency** | `row_hash` SHA-256 + SQL `MERGE` in Gold layer | Pipeline re-runs never produce duplicates |
+| **Quarantine pattern** | Invalid rows routed to `quarantine.orders` with reason arrays | Zero pipeline failures on bad input; full audit trail |
+| **SCD Type 2** | `valid_from` / `valid_to` dimension history | Point-in-time accurate joins for historical analytics |
+| **FX gap-fill** | Forward-fill across weekends/holidays in `ref.fx_daily` | Every order date finds exactly one exchange rate |
+| **Quality gates** | `@test` decorators on every Mage block + SQL reconciliation checks | Bugs surface at the block level before they propagate |
+| **Parallel models** | Decision Tree + KNN run concurrently in the DAG | Side-by-side model comparison without blocking the main path |
+| **Upstream validation** | `validate_iris` runs before split/train stages | Prevents training on corrupted or incomplete datasets |
+| **Fair message dispatch** | `basic_qos(prefetch_count=1)` in RabbitMQ driver | Even load distribution across multiple concurrent consumers |
+| **Graceful shutdown** | `KeyboardInterrupt` caught in driver consumer loop | No dangling connections or unacked messages on exit |
+| **CI/CD** | GitHub Actions — pytest + stream import check on every push | Every commit is verified before it reaches `main` |
 
 ---
 
-## 👤 Author & Contribution
+## 👤 Author
 
-- **Author**: Vishal ([@vishal261104](https://github.com/vishal261104))
+- **Vishal** · [@vishal261104](https://github.com/vishal261104)
 - **Repository**: [https://github.com/vishal261104/DEAsgn](https://github.com/vishal261104/DEAsgn)
-- **Coursework**: Data Engineering assignment: *From Git to Gold*
+- **Coursework**: Data Engineering Assignment — *From Git to Gold*
