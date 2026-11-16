@@ -1,30 +1,41 @@
 import pandas as pd
 from sklearn.datasets import load_iris
 
-# One-line version for students: “If Mage hasn’t already provided the data_loader
-# and test labels, import them, so the file works both inside and outside Mage.
+try:
+    from mage_ai.data_preparation.decorators import data_loader, test
+except ImportError:
+    def identity_decorator(func=None, *args, **kwargs):
+        if func is not None and callable(func):
+            return func
 
-# Import Mage's decorators only if they aren't already loaded
-if 'data_loader' not in globals():
-    from mage_ai.data_preparation.decorators import data_loader
-if 'test' not in globals():
-    from mage_ai.data_preparation.decorators import test
+        def decorator(f):
+            return f
+
+        return decorator
+
+    data_loader = identity_decorator
+    test = identity_decorator
+
+# Expected number of samples in the Iris dataset
+EXPECTED_ROW_COUNT = 150
 
 
-# data_loader marks this function as the pipeline's first step: it brings data in
-# It loads the built-in Iris dataset from scikit-learn as a pandas table
-# The returned DataFrame is passed automatically to the next block (prepare_data)
 @data_loader
 def load_data(*args, **kwargs):
+    """Load the Iris dataset from scikit-learn and return it as a DataFrame.
+
+    Returns:
+        pd.DataFrame: 150 rows with 4 feature columns and 1 target column.
+    """
     iris = load_iris(as_frame=True)
-    df = iris.frame                      # 4 feature columns + 'target'
-    print('Rows loaded:', len(df))
+    df = iris.frame  # 4 feature columns + 'target'
+    print("Rows loaded:", len(df))
     return df
 
 
-# test marks this as a quality check that Mage runs right after the block finishes
-# 'output' is whatever load_data returned, so we can verify the data
-# If the table doesn't have exactly 150 rows, the block fails and the pipeline stops
 @test
 def test_output(output, *args):
-    assert len(output) == 150, 'Iris must have 150 rows'
+    """Verify the dataset has exactly 150 rows."""
+    assert len(output) == EXPECTED_ROW_COUNT, (
+        f"Expected {EXPECTED_ROW_COUNT} rows, got {len(output)}"
+    )

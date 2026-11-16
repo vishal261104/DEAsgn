@@ -1,42 +1,63 @@
 import joblib
 from sklearn.tree import DecisionTreeClassifier
 
-# Import Mage's decorators only if they aren't already loaded
-if 'transformer' not in globals():
-    from mage_ai.data_preparation.decorators import transformer
-if 'test' not in globals():
-    from mage_ai.data_preparation.decorators import test
+try:
+    from mage_ai.data_preparation.decorators import transformer, test
+except ImportError:
+    def identity_decorator(func=None, *args, **kwargs):
+        if func is not None and callable(func):
+            return func
+
+        def decorator(f):
+            return f
+
+        return decorator
+
+    transformer = identity_decorator
+    test = identity_decorator
 
 # The 4 measurement columns the model uses to predict the species
-FEATURES = ['sepal length (cm)', 'sepal width (cm)',
-            'petal length (cm)', 'petal width (cm)']
+FEATURES = [
+    "sepal length (cm)",
+    "sepal width (cm)",
+    "petal length (cm)",
+    "petal width (cm)",
+]
+
+# Minimum acceptable test accuracy threshold
+MIN_ACCURACY = 0.8
 
 
-# transformer receives prepare_data's table (150 rows with 'split') as 'df'
-# Reads max_depth from Mage's pipeline variables, then trains a decision tree on the train rows
-# Predicts the 30 test rows, prints accuracy, saves the model and returns the predictions
 @transformer
 def train(df, *args, **kwargs):
-    max_depth = int(kwargs.get('max_depth', 3))
+    """Train a DecisionTreeClassifier on the train split and return predictions.
 
-    train_df = df[df['split'] == 'train']
-    test_df = df[df['split'] == 'test'].copy()
+    Args:
+        df (pd.DataFrame): Combined train/test DataFrame with a 'split' column.
+
+    Returns:
+        pd.DataFrame: Test rows with an added 'predicted' column.
+    """
+    max_depth = int(kwargs.get("max_depth", 3))
+
+    train_df = df[df["split"] == "train"]
+    test_df = df[df["split"] == "test"].copy()
 
     model = DecisionTreeClassifier(max_depth=max_depth, random_state=42)
-    model.fit(train_df[FEATURES], train_df['target'])
+    model.fit(train_df[FEATURES], train_df["target"])
 
-    test_df['predicted'] = model.predict(test_df[FEATURES])
-    accuracy = (test_df['predicted'] == test_df['target']).mean()
-    print('max_depth =', max_depth, '| Test accuracy =', round(accuracy, 3))
+    test_df["predicted"] = model.predict(test_df[FEATURES])
+    accuracy = (test_df["predicted"] == test_df["target"]).mean()
+    print("max_depth =", max_depth, "| Test accuracy =", round(accuracy, 3))
 
-    joblib.dump(model, 'iris_model.pkl')
+    joblib.dump(model, "iris_model.pkl")
     return test_df
 
 
-# Runs right after train finishes, using its 30 predicted rows as 'output'
-# Recalculates accuracy by comparing 'predicted' with the true 'target'
-# If accuracy is below 80%, the block fails and save_results / evaluate_model never run
 @test
 def test_accuracy(output, *args):
-    accuracy = (output['predicted'] == output['target']).mean()
-    assert accuracy >= 0.8, 'Model accuracy is below 80%'
+    """Assert that test accuracy meets the minimum threshold."""
+    accuracy = (output["predicted"] == output["target"]).mean()
+    assert accuracy >= MIN_ACCURACY, (
+        f"Model accuracy {accuracy:.3f} is below threshold {MIN_ACCURACY}"
+    )
