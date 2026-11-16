@@ -28,3 +28,6 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -q
+
+      - name: Check stream module imports
+        run: python -c "import stream; print('stream package OK, version:', stream.__version__)"
